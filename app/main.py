@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from . import database as db
 from . import terms as terms_mod
+from . import compilation as comp_mod
 from .segmenter import analyze
 from .subtitles import (LANGUAGE_NAMES, Cue, format_timestamp, parse_subtitle,
                         write_vtt)
@@ -83,6 +84,93 @@ def _build_notes(issues) -> dict[int, list[str]]:
         notes.setdefault(iss["cue_seq"], []).append(
             f"[校验问题/{iss['kind']}] {iss['reason']}")
     return notes
+
+
+# --- 片段合辑 ---
+
+class CompilationIn(BaseModel):
+    windows: list[dict]
+
+
+def _compilation_payload(sid: int,
+                         windows: list[tuple[float, float]],
+                         record: dict | None = None) -> dict:
+    """按窗口配置生成合辑结果：新时间轴上的 cue、来源序号与校验 NOTE。"""
+    if record is None:
+        record = db.get_artifact(sid)
+    cues = [Cue(start=c["start_sec"], end=c["end_sec"], text=c["text"])
+            for c in record["cues"]]
+    compiled = comp_mod.compile_cues(cues, windows)
+    notes_by_origin = _build_notes(record["issues"])
+    return {
+        "windows": [
+            {"start": round(s, 3), "end": round(e, 3), "length": round(e - s, 3)}
+            for s, e in windows
+        ],
+        "cues": [
+            {
+                "seq": cc.seq,
+                "start": round(cc.start, 3),
+                "end": round(cc.end, 3),
+                "duration": round(cc.end - cc.start, 3),
+                "text": cc.text,
+                "origin_seq": cc.origin_seq,
+                "notes": notes_by_origin.get(cc.origin_seq, []),
+            }
+            for cc in compiled
+        ],
+        "timeline_length": round(sum(e - s for s, e in windows), 3),
+    }
+
+
+@app.put("/api/submissions/{sid}/compilation")
+async def api_save_compilation(sid: int, payload: CompilationIn):
+    """保存（覆盖）该任务的片段合辑窗口配置，并返回最新合辑结果。"""
+    if not db.submission_exists(sid):
+        raise HTTPException(status_code=404, detail="记录不存在")
+    try:
+        windows = comp_mod.normalize_windows(payload.windows)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    db.save_compilation(sid, windows)
+    return _compilation_payload(sid, windows)
+
+
+@app.get("/api/submissions/{sid}/compilation")
+async def api_get_compilation(sid: int):
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    windows = db.get_compilation(sid)
+    if windows is None:
+        raise HTTPException(status_code=404, detail="该任务尚未配置片段合辑")
+    return _compilation_payload(sid, windows, record)
+
+
+@app.get("/api/submissions/{sid}/compilation-export")
+async def api_compilation_export(sid: int):
+    """导出独立合辑 WebVTT；空窗口集（已保存）返回结构有效的空 WebVTT。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    windows = db.get_compilation(sid)
+    if windows is None:
+        raise HTTPException(status_code=404, detail="该任务尚未配置片段合辑")
+
+    payload = _compilation_payload(sid, windows, record)
+    out_cues = [Cue(start=c["start"], end=c["end"], text=c["text"])
+                for c in payload["cues"]]
+    notes = {i: list(c["notes"]) for i, c in enumerate(payload["cues"])}
+    vtt = write_vtt(out_cues, notes=notes)
+
+    base = record["submission"]["filename"].rsplit(".", 1)[0]
+    filename = f"{base}.compilation.vtt"
+    return Response(
+        content=vtt,
+        media_type="text/vtt; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/analyze")

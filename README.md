@@ -19,6 +19,9 @@ docker compose up --build
 
 > http://localhost:8000
 
+首页即上传入口；上传分析完成后在同页「校验结果」卡片依次使用问题筛选、
+**片段合辑**与术语审校（均在结果页内，端口固定为宿主机 `8000`）。
+
 SQLite 数据库文件位于容器内 `/data/subtitles.db`，通过 Compose 命名卷
 `subtitle-data` 持久化；**数据库表在应用启动时自动初始化**，无需手工建表。
 
@@ -51,6 +54,16 @@ SQLite 数据库文件位于容器内 `/data/subtitles.db`，通过 Compose 命�
   `?language=xx`），仅输出检测语言匹配的修订 cue（保持原顺序、时间码与
   文本，仅保留这些 cue 的 `NOTE`），无匹配 cue 时仍返回结构有效的空
   WebVTT；未选择语言时导出全部修订 cue。
+- **片段合辑**：在结果页「片段合辑」卡片按指定顺序添加若干**互不重叠的
+  半开时间窗** `[起点, 终点)`（端点以秒计，起点非负、终点须大于起点；
+  窗口可相接、可上下调整顺序），从已保存的修订 cue 中取各窗口交集，裁到
+  窗口边界后依次拼接为一条**新时间轴**：时间基准按窗口长度逐窗累加、
+  窗内静音间隙原样保留，跨窗口的 cue 自动拆成多条，不生成零时长 cue。
+  合辑表展示**原 cue 序号与合辑时间码**及文本、对应校验 `NOTE`；
+  「导出合辑 WebVTT」输出独立的 `.compilation.vtt`（保留文本与对应校验
+  `NOTE`）；空窗口集导出结构有效的空 WebVTT，原修订导出不受任何影响。
+  窗口配置按任务存入 SQLite（覆盖式保存），从历史任务重开时自动载入，
+  可继续编辑、重新生成。
 - **历史任务**：每次校验存入 SQLite，可重新查看或再次导出。
 
 ## 术语审校
@@ -113,6 +126,9 @@ SQLite 数据库文件位于容器内 `/data/subtitles.db`，通过 Compose 命�
 | GET  | `/api/submissions` | 历史任务列表 |
 | GET  | `/api/submissions/{id}` | 单次任务完整结果（支持 `?language=en` 过滤） |
 | GET  | `/api/submissions/{id}/export` | 下载修订后的 WebVTT（支持 `?language=en`：仅导出该检测语言的修订 cue 及其校验 NOTE） |
+| PUT  | `/api/submissions/{id}/compilation` | 保存（覆盖）片段合辑窗口配置（JSON：`{"windows":[{"start":s,"end":e},…]}`，按数组顺序拼接），返回合辑 cue（含原 cue 序号、合辑时间码、校验 NOTE） |
+| GET  | `/api/submissions/{id}/compilation` | 读取已保存的合辑配置与结果（未配置返回 404；空窗口集返回空合辑） |
+| GET  | `/api/submissions/{id}/compilation-export` | 下载独立合辑 WebVTT（`xxx.compilation.vtt`；空窗口集为结构有效的空 WebVTT） |
 | GET  | `/api/terms` | 术语表列表（支持 `?language=zh` 过滤，通用术语一并返回） |
 | POST | `/api/terms` | 新增术语（JSON：`language`/`canonical`/`variants`/`forbidden`/`note`） |
 | PUT  | `/api/terms/{id}` | 更新术语 |
@@ -137,14 +153,16 @@ DB_PATH=./data/subtitles.db uvicorn app.main:app --reload --port 8000
 
 ```
 app/
-├── main.py          # FastAPI 路由与静态文件挂载
+├── main.py          # FastAPI 路由与静态文件挂载（含片段合辑接口）
+├── compilation.py   # 半开窗口校验 + cue 裁切/新时间轴拼接
 ├── segmenter.py     # 单元切分 + DP 断句 + 边界重分配 + 问题生成
 ├── subtitles.py     # VTT/SRT 解析、VTT 导出、语言检测
 ├── terms.py         # 术语表模型 + 多层归一匹配 + 跨 cue 不一致检测引擎
-├── database.py      # SQLite 初始化与持久化（含术语表/术语发现）
+├── database.py      # SQLite 初始化与持久化（含术语表/术语发现/合辑配置）
 └── static/          # 原生 HTML/CSS/JS（无构建步骤）
 tests/smoke_test.py        # FastAPI TestClient 端到端冒烟测试
 tests/term_engine_check.py # 术语引擎独立逻辑校验（仅需标准库）
+tests/compilation_check.py  # 片段合辑裁切/拼接/导出逻辑校验（仅需标准库）
 examples/                  # demo.vtt / demo.srt / terms-demo.vtt 示例字幕
 Dockerfile
 docker-compose.yml
@@ -157,4 +175,5 @@ requirements.txt
 pip install -r requirements.txt
 DB_PATH=/tmp/test.db python3 tests/smoke_test.py   # 端到端（含术语审校）
 python3 tests/term_engine_check.py                 # 术语引擎纯逻辑校验（无需依赖）
+python3 tests/compilation_check.py                  # 片段合辑纯逻辑校验（无需依赖）
 ```

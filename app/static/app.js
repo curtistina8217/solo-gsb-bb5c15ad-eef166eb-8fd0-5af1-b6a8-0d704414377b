@@ -24,6 +24,8 @@
   let currentFindings = [];
   let termsCache = [];
   let termLanguages = {};
+  let compWindows = [];
+  let currentCompilation = null;
 
   const fmtTc = (s) => {
     if (s == null || isNaN(s)) return "--:--:--.---";
@@ -69,6 +71,7 @@
       current = data;
       render(data);
       loadFindings(data.id);
+      resetCompilation();
     } catch (err) {
       errBox.textContent = err.message;
       errBox.hidden = false;
@@ -385,6 +388,159 @@
     window.location.href = `/api/submissions/${current.id}/term-report`;
   });
 
+  /* ---------- 片段合辑 ---------- */
+
+  function markCompDirty() {
+    currentCompilation = null;
+    $("#comp-export").disabled = true;
+    $("#comp-summary").textContent = "窗口配置已修改，点击「生成合辑」保存并预览。";
+    $("#comp-table tbody").innerHTML = "";
+  }
+
+  function renderCompWindows() {
+    const box = $("#comp-windows");
+    if (!compWindows.length) {
+      box.innerHTML = '<p class="muted">尚未添加窗口，点击「添加窗口」开始配置。</p>';
+      return;
+    }
+    box.innerHTML = compWindows.map((w, i) => `
+      <div class="comp-row" data-idx="${i}">
+        <span class="comp-no">#${i + 1}</span>
+        <input type="number" class="comp-start" min="0" step="0.001"
+               placeholder="起点（秒）" value="${escapeHtml(String(w.start))}" />
+        <span class="comp-arrow">→</span>
+        <input type="number" class="comp-end" min="0" step="0.001"
+               placeholder="终点（秒）" value="${escapeHtml(String(w.end))}" />
+        <button type="button" class="secondary comp-up" title="上移"
+                ${i === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" class="secondary comp-down" title="下移"
+                ${i === compWindows.length - 1 ? "disabled" : ""}>↓</button>
+        <button type="button" class="secondary comp-del">删除</button>
+      </div>`).join("");
+
+    box.querySelectorAll(".comp-row").forEach((row) => {
+      const i = Number(row.dataset.idx);
+      row.querySelector(".comp-start").addEventListener("input", (e) => {
+        compWindows[i].start = e.target.value;
+        markCompDirty();
+      });
+      row.querySelector(".comp-end").addEventListener("input", (e) => {
+        compWindows[i].end = e.target.value;
+        markCompDirty();
+      });
+      row.querySelector(".comp-up").addEventListener("click", () => {
+        if (i > 0) {
+          [compWindows[i - 1], compWindows[i]] = [compWindows[i], compWindows[i - 1]];
+          markCompDirty();
+          renderCompWindows();
+        }
+      });
+      row.querySelector(".comp-down").addEventListener("click", () => {
+        if (i < compWindows.length - 1) {
+          [compWindows[i], compWindows[i + 1]] = [compWindows[i + 1], compWindows[i]];
+          markCompDirty();
+          renderCompWindows();
+        }
+      });
+      row.querySelector(".comp-del").addEventListener("click", () => {
+        compWindows.splice(i, 1);
+        markCompDirty();
+        renderCompWindows();
+      });
+    });
+  }
+
+  function renderCompilation(data) {
+    currentCompilation = data;
+    $("#comp-export").disabled = false;
+    $("#comp-summary").textContent =
+      `共 ${data.windows.length} 个窗口 · 合辑时间轴总长 ` +
+      `${data.timeline_length.toFixed(3)}s · 生成 ${data.cues.length} 条 cue` +
+      (data.cues.length === 0 ? "（空合辑：窗口内没有任何修订 cue）" : "");
+
+    $("#comp-table tbody").innerHTML = data.cues.map((c) => {
+      const notes = (c.notes || []).map((n) =>
+        `<span class="comp-note">NOTE ${escapeHtml(n)}</span>`).join("");
+      return `<tr>
+        <td>${c.seq + 1}</td>
+        <td class="tc">${fmtTc(c.start)} →<br/>${fmtTc(c.end)}</td>
+        <td class="tc">${c.duration.toFixed(2)}s</td>
+        <td>原 cue ${c.origin_seq + 1}</td>
+        <td class="cue-text"><span>${escapeHtml(c.text)}</span>${notes}</td>
+      </tr>`;
+    }).join("") ||
+      '<tr><td colspan="5" class="muted">窗口内没有命中任何修订 cue，' +
+      '导出将得到结构有效的空 WebVTT。</td></tr>';
+  }
+
+  function resetCompilation() {
+    compWindows = [];
+    currentCompilation = null;
+    $("#comp-export").disabled = true;
+    $("#comp-error").hidden = true;
+    $("#comp-summary").textContent = "";
+    $("#comp-table tbody").innerHTML = "";
+    renderCompWindows();
+  }
+
+  async function buildCompilation() {
+    if (!current) return;
+    const errBox = $("#comp-error");
+    errBox.hidden = true;
+
+    const windows = compWindows.map((w) => ({
+      start: w.start === "" ? NaN : Number(w.start),
+      end: w.end === "" ? NaN : Number(w.end),
+    }));
+    const resp = await fetch(`/api/submissions/${current.id}/compilation`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ windows }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "保存合辑配置失败");
+    renderCompilation(data);
+  }
+
+  async function loadCompilation(sid) {
+    resetCompilation();
+    try {
+      const resp = await fetch(`/api/submissions/${sid}/compilation`);
+      if (resp.status === 404) return;  // 该任务尚未配置合辑
+      const data = await resp.json();
+      if (!resp.ok) return;
+      compWindows = data.windows.map((w) => ({
+        start: String(w.start), end: String(w.end),
+      }));
+      renderCompWindows();
+      renderCompilation(data);
+    } catch (_) {
+      /* 合辑配置加载失败不阻塞结果页 */
+    }
+  }
+
+  $("#comp-add").addEventListener("click", () => {
+    compWindows.push({ start: "", end: "" });
+    markCompDirty();
+    renderCompWindows();
+  });
+
+  $("#comp-build").addEventListener("click", async () => {
+    const errBox = $("#comp-error");
+    try {
+      await buildCompilation();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.hidden = false;
+    }
+  });
+
+  $("#comp-export").addEventListener("click", () => {
+    if (!current || !currentCompilation) return;
+    window.location.href =
+      `/api/submissions/${current.id}/compilation-export`;
+  });
+
   /* ---------- 历史任务 ---------- */
 
   async function loadHistory() {
@@ -412,6 +568,7 @@
           current = await resp.json();
           render(current);
           loadFindings(current.id);
+          loadCompilation(current.id);
         }));
     } catch (_) {
       /* 历史加载失败不阻塞主流程 */

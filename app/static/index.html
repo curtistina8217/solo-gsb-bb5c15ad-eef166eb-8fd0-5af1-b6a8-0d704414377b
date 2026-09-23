@@ -131,6 +131,38 @@
         </div>
         <ul id="term-findings" class="issues term-findings"></ul>
       </div>
+
+      <div class="compilation" id="compilation">
+        <div class="result-head term-head">
+          <h3>片段合辑 <span class="muted">按顺序截取互不重叠的半开时间窗 [起点, 终点)，拼接为一条新时间轴</span></h3>
+          <div class="term-ops">
+            <button id="comp-add" class="secondary">添加窗口</button>
+            <button id="comp-build" class="primary">生成合辑</button>
+            <button id="comp-export" class="secondary" disabled>导出合辑 WebVTT</button>
+          </div>
+        </div>
+        <p class="muted comp-hint">
+          端点以秒计（如 12.5），起点非负、终点须大于起点，窗口之间不能重叠（可以相接）。
+          合辑会裁到窗口边界、按窗口长度累加时间基准并保留窗内静音间隙；跨窗口的修订 cue
+          会拆成多条。配置按任务保存，重开历史任务可继续编辑。
+        </p>
+        <p class="error" id="comp-error" hidden></p>
+        <div id="comp-windows" class="comp-windows"></div>
+        <div class="comp-result">
+          <div id="comp-summary" class="muted"></div>
+          <div class="table-wrap">
+            <table id="comp-table">
+              <thead>
+                <tr>
+                  <th>合辑 #</th><th>合辑时间码</th><th>停留</th>
+                  <th>原 cue 序号</th><th>文本 / 校验 NOTE</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="card" id="history-card">

@@ -296,6 +296,129 @@ def main() -> None:
             f"/api/submissions/{tsid}/term-check").json()["items"] == []
         assert client.delete("/api/terms/9999").status_code == 404
 
+        # --- 片段合辑 ---
+        # cue A：含不可拆分超长拉丁 token（产生超长校验 NOTE），时长充裕；
+        # cue B 正常；两条 cue 之间有 1s 静音间隙
+        token = "Supercalifragilisticexpialidocious"
+        comp_vtt = (
+            "WEBVTT\n\n"
+            f"00:00:00.000 --> 00:00:04.000\n{token}\n\n"
+            "00:00:05.000 --> 00:00:09.000\n正常的一句中文内容。\n"
+        )
+        cp = client.post(
+            "/api/analyze",
+            files={"file": ("comp.vtt", comp_vtt, "text/vtt")},
+            data={"max_chars": "10", "min_dwell": "0.5", "max_cps": "30"},
+        ).json()
+        cpid = cp["id"]
+        assert len(cp["cues"]) == 2
+        assert [i["kind"] for i in cp["issues"]] == ["line_too_long"]
+
+        # 未配置过：GET / 导出均 404；原修订导出不受影响
+        assert client.get(
+            f"/api/submissions/{cpid}/compilation").status_code == 404
+        assert client.get(
+            f"/api/submissions/{cpid}/compilation-export").status_code == 404
+        plain = client.get(f"/api/submissions/{cpid}/export")
+        assert plain.text.count("-->") == 2
+
+        # 参数校验：起点非负、终点大于起点、窗口互不重叠
+        for body in ([[{"start": -1, "end": 2}],
+                      [{"start": 2, "end": 2}],
+                      [{"start": 0, "end": 2}, {"start": 1, "end": 3}]]):
+            assert client.put(
+                f"/api/submissions/{cpid}/compilation",
+                json={"windows": body}).status_code == 400
+
+        # 窗口按用户给定顺序：[6,8) 在前、[1,3) 在后
+        # 窗 [6,8) 裁 B → 新轴 [0,2)；窗 [1,3) 裁 A → base 2 + [1,3)
+        # = 新轴 [2,4)（基准按窗口长度累加）
+        r = client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": 6, "end": 8}, {"start": 1, "end": 3}],
+        })
+        assert r.status_code == 200
+        comp = r.json()
+        assert [w["length"] for w in comp["windows"]] == [2.0, 2.0]
+        assert comp["timeline_length"] == 4.0
+        assert [(c["origin_seq"], c["start"], c["end"], c["text"])
+                for c in comp["cues"]] == [
+            (1, 0.0, 2.0, "正常的一句中文内容。"),
+            (0, 2.0, 4.0, token),
+        ]
+        assert comp["cues"][0]["notes"] == []
+        assert comp["cues"][1]["notes"] and all(
+            n.startswith("[校验问题/line_too_long]")
+            for n in comp["cues"][1]["notes"])
+
+        # 导出独立 WebVTT：新时间码、保留文本与对应校验 NOTE
+        exp = client.get(f"/api/submissions/{cpid}/compilation-export")
+        assert exp.status_code == 200
+        assert "compilation.vtt" in exp.headers["content-disposition"]
+        blocks = _parse_vtt_blocks(exp.text)
+        assert len(blocks) == 2
+        notes0, s0, e0, t0 = blocks[0]
+        notes1, s1, e1, t1 = blocks[1]
+        assert notes0 == []
+        assert notes1 and all(n.startswith("[校验问题/line_too_long]")
+                             for n in notes1)
+        assert (s0, e0, t0) == ("00:00:00.000", "00:00:02.000",
+                                "正常的一句中文内容。")
+        assert (s1, e1, t1) == ("00:00:02.000", "00:00:04.000", token)
+
+        # 跨窗口 cue 拆分 + 窗内静音间隙保留：
+        # A[0,4) 跨窗 [1,2.5)/[3,7) 拆成两段；B 被 [3,7) 裁切，
+        # A 第二段 [3,4) 与 B[5,7) 间 1s 间隙在新轴上原样保留
+        r2 = client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": 1, "end": 2.5}, {"start": 3, "end": 7}],
+        }).json()
+        assert [(c["origin_seq"], round(c["start"], 3), round(c["end"], 3))
+                for c in r2["cues"]] == [
+            (0, 0.0, 1.5),       # A 第一段
+            (0, 1.5, 2.5),       # A 第二段（基准 += 1.5）
+            (1, 3.5, 5.5),       # B[5,7) → 新轴 [3.5,5.5)，与上段间隔 1s
+        ]
+        # 同一原 cue 拆出的两段都带着同一份校验 NOTE
+        assert all(c["notes"] for c in r2["cues"][:2])
+        assert r2["cues"][2]["notes"] == []
+
+        # 零时长交集不生成 cue：窗口只落在两 cue 之间的静音间隙上
+        gap = client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": 4.2, "end": 4.8}],
+        }).json()
+        assert gap["cues"] == []
+        gap_exp = client.get(
+            f"/api/submissions/{cpid}/compilation-export")
+        assert gap_exp.status_code == 200
+        assert _parse_vtt_blocks(gap_exp.text) == []
+        assert gap_exp.text.strip() == "WEBVTT"
+
+        # 空窗口集：保存成功，导出结构有效的空 WebVTT
+        empty = client.put(f"/api/submissions/{cpid}/compilation",
+                           json={"windows": []}).json()
+        assert empty["windows"] == [] and empty["cues"] == []
+        assert empty["timeline_length"] == 0
+        empty_exp = client.get(
+            f"/api/submissions/{cpid}/compilation-export")
+        assert empty_exp.status_code == 200
+        assert empty_exp.text.strip() == "WEBVTT"
+
+        # 配置按任务持久化，可覆盖：GET 取回最近一次（空集），再改回非空
+        got = client.get(f"/api/submissions/{cpid}/compilation").json()
+        assert got["windows"] == []
+        client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": 1, "end": 3}],
+        })
+        got = client.get(f"/api/submissions/{cpid}/compilation").json()
+        assert len(got["windows"]) == 1 and len(got["cues"]) == 1
+
+        # 覆盖后原修订导出仍保持不变
+        plain2 = client.get(f"/api/submissions/{cpid}/export")
+        assert plain2.text == plain.text
+
+        # 不存在的任务
+        assert client.put("/api/submissions/999999/compilation",
+                          json={"windows": []}).status_code == 404
+
     print("SMOKE_TESTS_OK")
 
 

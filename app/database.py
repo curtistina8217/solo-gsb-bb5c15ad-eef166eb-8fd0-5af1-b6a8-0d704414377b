@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     revised_vtt TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS compilations (
+    submission_id INTEGER PRIMARY KEY
+        REFERENCES submissions(id) ON DELETE CASCADE,
+    windows_json  TEXT NOT NULL DEFAULT '[]',
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS terms (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     language    TEXT NOT NULL DEFAULT 'all',
@@ -210,6 +217,35 @@ def submission_exists(submission_id: int) -> bool:
             "SELECT 1 FROM submissions WHERE id = ?", (submission_id,)
         ).fetchone()
     return row is not None
+
+
+# --- 片段合辑窗口配置（按任务保存，可反复编辑覆盖） ---
+
+def save_compilation(submission_id: int,
+                     windows: list[tuple[float, float]]) -> None:
+    payload = [{"start": s, "end": e} for s, e in windows]
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO compilations (submission_id, windows_json, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(submission_id) DO UPDATE SET
+                   windows_json = excluded.windows_json,
+                   updated_at = datetime('now')""",
+            (submission_id, json.dumps(payload, ensure_ascii=False)),
+        )
+
+
+def get_compilation(submission_id: int) -> list[tuple[float, float]] | None:
+    """返回已保存的窗口列表；任务从未配置过返回 None（空集返回 []）。"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT windows_json FROM compilations WHERE submission_id = ?",
+            (submission_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    raw = json.loads(row["windows_json"] or "[]")
+    return [(float(w["start"]), float(w["end"])) for w in raw]
 
 
 # --- 术语表 ---

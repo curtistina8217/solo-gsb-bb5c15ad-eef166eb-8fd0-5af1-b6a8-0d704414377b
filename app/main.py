@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from . import database as db
 from . import terms as terms_mod
+from . import compilation as comp_mod
 from .segmenter import analyze
 from .subtitles import (LANGUAGE_NAMES, Cue, format_timestamp, parse_subtitle,
                         write_vtt)
@@ -475,6 +476,97 @@ async def api_term_report(sid: int, format: str = "csv"):
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# --- 片段合辑 ---
+
+class CompWindowIn(BaseModel):
+    start: float
+    end: float
+
+
+class CompilationIn(BaseModel):
+    windows: list[CompWindowIn]
+
+
+def _comp_cues(record) -> list[Cue]:
+    return [Cue(start=c["start_sec"], end=c["end_sec"], text=c["text"])
+            for c in record["cues"]]
+
+
+def _comp_payload(record, raw_windows: list[dict]) -> dict:
+    windows = comp_mod.normalize_windows(raw_windows)
+    cues = _comp_cues(record)
+    compiled = comp_mod.compile_cues(cues, windows)
+    all_notes = _build_notes(record["issues"])
+    return {
+        "windows": [{"start": w.start, "end": w.end} for w in windows],
+        "window_offsets": comp_mod.window_offsets(windows),
+        "total_duration": comp_mod.total_duration(windows),
+        "cue_count": len(compiled),
+        "cues": [
+            {
+                "seq": i,
+                "start": c.start,
+                "end": c.end,
+                "duration": round(c.end - c.start, 3),
+                "source_seq": c.source_seq,
+                "source_cue": c.source_seq + 1,
+                "window_index": c.window_index + 1,
+                "text": c.text,
+                "notes": all_notes.get(c.source_seq, []),
+            }
+            for i, c in enumerate(compiled)
+        ],
+    }
+
+
+@app.get("/api/submissions/{sid}/compilation")
+async def api_get_compilation(sid: int):
+    """读取按任务保存的合辑窗口配置；未配置过返回空窗口集。"""
+    if not db.submission_exists(sid):
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"windows": db.get_compilation(sid)}
+
+
+@app.put("/api/submissions/{sid}/compilation")
+async def api_save_compilation(sid: int, payload: CompilationIn):
+    """按任务保存窗口配置并返回合辑预览（空窗口集合法）。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    raw = [{"start": w.start, "end": w.end} for w in payload.windows]
+    try:
+        windows = comp_mod.normalize_windows(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    stored = [{"start": w.start, "end": w.end} for w in windows]
+    db.save_compilation(sid, stored)
+    return _comp_payload(record, stored)
+
+
+@app.get("/api/submissions/{sid}/compilation/export")
+async def api_export_compilation(sid: int):
+    """导出独立合辑 WebVTT（保留文本与来源修订 cue 的校验 NOTE）。"""
+    record = db.get_artifact(sid)
+    if record is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    raw = db.get_compilation(sid)
+    try:
+        windows = comp_mod.normalize_windows(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    compiled = comp_mod.compile_cues(_comp_cues(record), windows)
+    all_notes = _build_notes(record["issues"])
+    vtt = comp_mod.build_vtt(compiled, notes=all_notes)
+    base = record["submission"]["filename"].rsplit(".", 1)[0]
+    filename = f"{base}.compilation.vtt"
+    return Response(
+        content=vtt,
+        media_type="text/vtt; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{filename}"'},
+    )
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

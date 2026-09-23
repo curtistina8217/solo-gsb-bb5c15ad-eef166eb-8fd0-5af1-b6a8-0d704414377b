@@ -53,6 +53,26 @@ SQLite 数据库文件位于容器内 `/data/subtitles.db`，通过 Compose 命�
   WebVTT；未选择语言时导出全部修订 cue。
 - **历史任务**：每次校验存入 SQLite，可重新查看或再次导出。
 
+## 片段合辑
+
+在结果页「片段合辑」卡片中，按**用户指定顺序**输入若干**互不重叠的半开
+时间窗 `[起点,终点)`**（端点以秒计，起点非负、终点大于起点，窗口之间允许
+相切）。系统从已保存的**修订 cue** 中取各窗口交集：
+
+- 裁到窗口边界后，以**窗口长度为基准偏移**依次拼接为一条新时间轴；窗内
+  cue 间的静音间隙原样保留，窗口之间的间隙被丢弃，窗口顺序即为拼接顺序；
+- **跨窗口的 cue 自动拆成多条**（文本相同），不生成零时长 cue；
+- 合辑预览表展示**原修订 cue 序号**、所属窗口与**合辑时间码**及对应校验
+  `NOTE`，可一键**导出独立 WebVTT**（文件名形如 `xxx.compilation.vtt`，
+  保留原文本与来源 cue 的校验 NOTE）；
+- **空窗口集**（或窗口与任何 cue 均无交集）输出结构有效的空 WebVTT
+  （仅 `WEBVTT` 头）；
+- 窗口配置**按任务保存在 SQLite**：重新打开历史任务时自动回读并给出预览，
+  可继续增删、排序后再次生成；原修订导出（`/export`）不受窗口配置影响。
+
+> 入口：校验结果页「片段合辑」卡片（上传或打开历史任务后出现）；服务与
+> 端口不变，Docker 一键启动后访问 <http://localhost:8000>。
+
 ## 术语审校
 
 ### 术语表（按语言区分）
@@ -122,6 +142,9 @@ SQLite 数据库文件位于容器内 `/data/subtitles.db`，通过 Compose 命�
 | POST | `/api/terms/findings/status` | 批量更新确认状态（`ids` + `pending`/`accepted`/`dismissed`） |
 | GET  | `/api/submissions/{id}/term-export` | 应用已接受替换，导出术语修订 WebVTT |
 | GET  | `/api/submissions/{id}/term-report` | 导出审校报告 CSV（`?format=json` 返回 JSON） |
+| GET  | `/api/submissions/{id}/compilation` | 读取按任务保存的合辑窗口配置（未配置返回空窗口集） |
+| PUT  | `/api/submissions/{id}/compilation` | 保存窗口配置并返回合辑预览（JSON：`windows`，半开 `[start,end)` 秒） |
+| GET  | `/api/submissions/{id}/compilation/export` | 导出独立合辑 WebVTT（空窗口集为有效空 WebVTT） |
 | GET  | `/api/health` | 健康检查 |
 | GET  | `/docs` | 自动生成的接口文档 |
 
@@ -140,8 +163,9 @@ app/
 ├── main.py          # FastAPI 路由与静态文件挂载
 ├── segmenter.py     # 单元切分 + DP 断句 + 边界重分配 + 问题生成
 ├── subtitles.py     # VTT/SRT 解析、VTT 导出、语言检测
+├── compilation.py   # 片段合辑：半开时间窗校验、交集裁剪、时间轴拼接与导出
 ├── terms.py         # 术语表模型 + 多层归一匹配 + 跨 cue 不一致检测引擎
-├── database.py      # SQLite 初始化与持久化（含术语表/术语发现）
+├── database.py      # SQLite 初始化与持久化（含术语表/术语发现/合辑配置）
 └── static/          # 原生 HTML/CSS/JS（无构建步骤）
 tests/smoke_test.py        # FastAPI TestClient 端到端冒烟测试
 tests/term_engine_check.py # 术语引擎独立逻辑校验（仅需标准库）

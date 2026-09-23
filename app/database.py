@@ -84,6 +84,13 @@ CREATE INDEX IF NOT EXISTS idx_cues_submission ON cues(submission_id);
 CREATE INDEX IF NOT EXISTS idx_issues_submission ON issues(submission_id);
 CREATE INDEX IF NOT EXISTS idx_issues_language ON issues(submission_id, language);
 CREATE INDEX IF NOT EXISTS idx_term_findings_sub ON term_findings(submission_id);
+
+CREATE TABLE IF NOT EXISTS compilations (
+    submission_id INTEGER PRIMARY KEY
+        REFERENCES submissions(id) ON DELETE CASCADE,
+    windows_json  TEXT NOT NULL DEFAULT '[]',
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -323,3 +330,28 @@ def accepted_findings(submission_id: int) -> list[dict]:
             (submission_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- 片段合辑窗口配置（按任务保存，重开历史任务可再编辑） ---
+
+def get_compilation(submission_id: int) -> list[dict]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT windows_json FROM compilations WHERE submission_id = ?",
+            (submission_id,),
+        ).fetchone()
+    if row is None:
+        return []
+    return json.loads(row["windows_json"] or "[]")
+
+
+def save_compilation(submission_id: int, windows: list[dict]) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO compilations (submission_id, windows_json, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(submission_id) DO UPDATE SET
+                   windows_json = excluded.windows_json,
+                   updated_at = datetime('now')""",
+            (submission_id, json.dumps(windows, ensure_ascii=False)),
+        )

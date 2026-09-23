@@ -302,3 +302,53 @@ li.accepted .fnd-status { color: var(--ok-ink); }
 .tag.width { background: #dcf3ef; color: #0f766e; }
 .tag.punct { background: #fff0cf; color: var(--warn-ink); }
 .tag.spelling { background: #efe2ff; color: #6b2fb3; }
+
+/* --- 片段合辑 --- */
+.compilation {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.comp-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+}
+.comp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.comp-idx {
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 52px;
+}
+.comp-row input[type="number"] { width: 130px; }
+.comp-sep { color: var(--muted); }
+.comp-off {
+  font-size: 12px;
+  color: var(--brand-dark);
+  font-variant-numeric: tabular-nums;
+  flex: 1;
+}
+.comp-row button { padding: 5px 11px; font-size: 13px; }
+.comp-row button:disabled { opacity: .35; cursor: default; }
+.comp-ops {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.comp-empty { font-size: 13px; margin: 6px 0; }
+.comp-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--error-ink);
+  background: var(--error-bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+}

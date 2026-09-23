@@ -131,6 +131,34 @@
         </div>
         <ul id="term-findings" class="issues term-findings"></ul>
       </div>
+
+      <div class="compilation" id="compilation">
+        <div class="result-head term-head">
+          <h3>片段合辑 <span class="muted">按顺序输入互不重叠的半开时间窗 [起点,终点)（秒），与修订 cue 取交集后拼接为新时间轴；跨窗 cue 自动拆分，保留窗内静音间隙</span></h3>
+          <div class="term-ops">
+            <button id="comp-apply" class="primary">生成合辑</button>
+            <button id="comp-export" class="secondary">导出合辑 WebVTT</button>
+          </div>
+        </div>
+        <div class="comp-rows" id="comp-rows"></div>
+        <div class="comp-ops">
+          <button type="button" id="comp-add" class="secondary">+ 添加窗口</button>
+          <button type="button" id="comp-clear" class="secondary">清空全部窗口</button>
+          <span id="comp-summary" class="muted"></span>
+        </div>
+        <p class="error" id="comp-error" hidden></p>
+        <div class="table-wrap" id="comp-preview-wrap" hidden>
+          <table id="comp-table">
+            <thead>
+              <tr>
+                <th>合辑 #</th><th>合辑时间码</th><th>停留</th>
+                <th>窗口</th><th>原修订 cue</th><th>文本 / 校验 NOTE</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section class="card" id="history-card">

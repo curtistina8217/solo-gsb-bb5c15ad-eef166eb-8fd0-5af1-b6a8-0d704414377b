@@ -24,6 +24,8 @@
   let currentFindings = [];
   let termsCache = [];
   let termLanguages = {};
+  let compWindows = [];   // [{start: string, end: string}]，按用户顺序
+  let compData = null;    // 最近一次合辑预览结果
 
   const fmtTc = (s) => {
     if (s == null || isNaN(s)) return "--:--:--.---";
@@ -69,6 +71,7 @@
       current = data;
       render(data);
       loadFindings(data.id);
+      loadCompilation(data.id);
     } catch (err) {
       errBox.textContent = err.message;
       errBox.hidden = false;
@@ -385,6 +388,193 @@
     window.location.href = `/api/submissions/${current.id}/term-report`;
   });
 
+  /* ---------- 片段合辑 ---------- */
+
+  function compRenderRows() {
+    const box = $("#comp-rows");
+    if (!compWindows.length) {
+      box.innerHTML =
+        '<p class="muted comp-empty">尚未添加窗口：点击「+ 添加窗口」，' +
+        "按想要的顺序输入若干 [起点,终点)（秒），窗口之间只能相切不能重叠。</p>";
+      return;
+    }
+    box.innerHTML = compWindows.map((w, i) => {
+      const off = compData && compData.window_offsets[i] != null
+        ? fmtTc(compData.window_offsets[i]) : null;
+      return `<div class="comp-row" data-idx="${i}">
+        <span class="comp-idx">窗口 ${i + 1}</span>
+        <input type="number" class="comp-start" min="0" step="0.1"
+               placeholder="起点秒" value="${escapeHtml(w.start)}" />
+        <span class="comp-sep">→</span>
+        <input type="number" class="comp-end" min="0" step="0.1"
+               placeholder="终点秒" value="${escapeHtml(w.end)}" />
+        <span class="comp-off">${off ? `合辑起点 ${off}` : ""}</span>
+        <button type="button" class="secondary comp-up" title="上移"
+                ${i === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" class="secondary comp-down" title="下移"
+                ${i === compWindows.length - 1 ? "disabled" : ""}>↓</button>
+        <button type="button" class="secondary comp-del">删除</button>
+      </div>`;
+    }).join("");
+
+    box.querySelectorAll(".comp-row").forEach((row) => {
+      const i = Number(row.dataset.idx);
+      row.querySelector(".comp-start").addEventListener("input", (e) => {
+        compWindows[i].start = e.target.value;
+      });
+      row.querySelector(".comp-end").addEventListener("input", (e) => {
+        compWindows[i].end = e.target.value;
+      });
+      row.querySelector(".comp-del").addEventListener("click", () => {
+        compWindows.splice(i, 1);
+        compRenderRows();
+      });
+      row.querySelector(".comp-up").addEventListener("click", () => {
+        if (i > 0) {
+          [compWindows[i - 1], compWindows[i]] =
+            [compWindows[i], compWindows[i - 1]];
+          compRenderRows();
+        }
+      });
+      row.querySelector(".comp-down").addEventListener("click", () => {
+        if (i < compWindows.length - 1) {
+          [compWindows[i + 1], compWindows[i]] =
+            [compWindows[i], compWindows[i + 1]];
+          compRenderRows();
+        }
+      });
+    });
+  }
+
+  function compShowError(msg) {
+    const box = $("#comp-error");
+    box.textContent = msg;
+    box.hidden = !msg;
+  }
+
+  async function compApply(persist) {
+    if (!current) return null;
+    // 整行留空视为「未填写」直接忽略；只填了一端要给出明确提示
+    const partial = compWindows.find((w) =>
+      (w.start === "") !== (w.end === ""));
+    if (partial) {
+      throw new Error("每个窗口都需要同时填写起点和终点（秒），" +
+                      "整行留空请删除或保持两端都为空");
+    }
+    const windows = compWindows
+      .filter((w) => w.start !== "" && w.end !== "")
+      .map((w) => ({ start: Number(w.start), end: Number(w.end) }));
+    if (windows.some((w) => !Number.isFinite(w.start) ||
+        !Number.isFinite(w.end))) {
+      throw new Error("窗口端点必须是有限数字（秒）");
+    }
+    const url = `/api/submissions/${current.id}/compilation`;
+    const resp = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ windows }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "合辑生成失败");
+    if (persist) compData = data;
+    return data;
+  }
+
+  function compRenderPreview(data) {
+    const wrap = $("#comp-preview-wrap");
+    const tbody = $("#comp-table tbody");
+    if (!data) {
+      wrap.hidden = true;
+      $("#comp-summary").textContent = "";
+      return;
+    }
+    const n = data.windows.length;
+    $("#comp-summary").textContent = n
+      ? `${n} 个窗口 · 合辑总时长 ${fmtTc(data.total_duration)} · ` +
+        `生成 ${data.cue_count} 条 cue（窗间间隙已去除，窗内静音保留）`
+      : "空窗口集：将导出结构有效的空 WebVTT（仅 WEBVTT 头）";
+    if (!n) {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+    tbody.innerHTML = data.cues.map((c) => {
+      const notes = (c.notes || []).map((n2) =>
+        `<span class="comp-note">${escapeHtml(n2)}</span>`).join("");
+      return `<tr>
+        <td>${c.seq + 1}</td>
+        <td class="tc">${fmtTc(c.start)} →<br/>${fmtTc(c.end)}</td>
+        <td class="tc">${c.duration.toFixed(2)}s</td>
+        <td>${c.window_index}</td>
+        <td><b>#${c.source_cue}</b></td>
+        <td class="cue-text"><span>${escapeHtml(c.text)}</span>${notes}</td>
+      </tr>`;
+    }).join("") || '<tr><td colspan="6" class="muted">窗口与任何修订 cue ' +
+      '均无交集（合辑为空）</td></tr>';
+  }
+
+  async function loadCompilation(sid) {
+    compData = null;
+    compShowError("");
+    try {
+      const resp = await fetch(`/api/submissions/${sid}/compilation`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      compWindows = (data.windows || []).map((w) => ({
+        start: String(w.start), end: String(w.end),
+      }));
+      compRenderRows();
+      if (compWindows.length) {
+        // 已保存过配置：自动给出合辑预览，可直接编辑后重新生成
+        const preview = await compApply(false);
+        compData = preview;
+        compRenderRows();
+        compRenderPreview(preview);
+      } else {
+        compRenderPreview(null);
+      }
+    } catch (err) {
+      compShowError(err.message);
+    }
+  }
+
+  $("#comp-add").addEventListener("click", () => {
+    compWindows.push({ start: "", end: "" });
+    compRenderRows();
+  });
+
+  $("#comp-clear").addEventListener("click", () => {
+    compWindows = [];
+    compData = null;
+    compShowError("");
+    compRenderRows();
+    compRenderPreview(null);
+  });
+
+  $("#comp-apply").addEventListener("click", async () => {
+    compShowError("");
+    try {
+      const data = await compApply(true);
+      compRenderRows();
+      compRenderPreview(data);
+    } catch (err) {
+      compShowError(err.message);
+    }
+  });
+
+  $("#comp-export").addEventListener("click", async () => {
+    if (!current) return;
+    compShowError("");
+    try {
+      // 先保存当前窗口配置，再下载独立合辑 WebVTT
+      await compApply(true);
+      window.location.href =
+        `/api/submissions/${current.id}/compilation/export`;
+    } catch (err) {
+      compShowError(err.message);
+    }
+  });
+
   /* ---------- 历史任务 ---------- */
 
   async function loadHistory() {
@@ -412,6 +602,7 @@
           current = await resp.json();
           render(current);
           loadFindings(current.id);
+          loadCompilation(current.id);
         }));
     } catch (_) {
       /* 历史加载失败不阻塞主流程 */

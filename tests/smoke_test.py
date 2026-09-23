@@ -15,7 +15,7 @@ os.environ.setdefault("DB_PATH", os.path.join(tempfile.mkdtemp(), "test.db"))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
-from app.subtitles import format_timestamp  # noqa: E402
+from app.subtitles import Cue, format_timestamp  # noqa: E402
 
 VTT = (
     "WEBVTT\n\n"
@@ -173,6 +173,216 @@ def main() -> None:
         fr_blocks = _parse_vtt_blocks(fr_resp.text)
         assert fr_blocks == []
         assert fr_resp.text.strip() == "WEBVTT"
+
+        # --- 片段合辑 ---
+        # 说明：修订会把相邻 cue 间静音间隙的中点并入两侧修订 cue 的时间码，
+        # 因此合辑期望值基于修订 cue 的实际起止时间推算。
+        comp_vtt = (
+            "WEBVTT\n\n"
+            "00:00:00.000 --> 00:00:02.000\n第一条字幕内容\n\n"
+            "00:00:03.000 --> 00:00:05.000\n第二条字幕内容宽松阈值下不会被切分\n\n"
+            "00:00:08.000 --> 00:00:12.000\n第三条跨越后续窗口边界的字幕\n"
+        )
+        cp = client.post(
+            "/api/analyze",
+            files={"file": ("comp.vtt", comp_vtt, "text/vtt")},
+            data={"max_chars": "80", "min_dwell": "0.5", "max_cps": "30"},
+        ).json()
+        cpid = cp["id"]
+        # 宽松阈值下不切分，修订 cue 与输入一一对应
+        assert len(cp["cues"]) == 3
+        src = {c["seq"]: c for c in cp["cues"]}
+
+        # 未配置过：GET 返回空窗口集
+        assert client.get(
+            f"/api/submissions/{cpid}/compilation").json() == {"windows": []}
+
+        # 窗口按用户顺序（先 8s 后 0s）：基准按窗口长度累加，
+        # 窗内静音保留，窗间间隙丢弃
+        resp = client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [
+                {"start": 8, "end": 13},   # 窗1，长 5s
+                {"start": 0, "end": 6},    # 窗2，长 6s（与窗1相切）
+            ],
+        })
+        assert resp.status_code == 200, resp.text
+        prev = resp.json()
+        assert prev["window_offsets"] == [0.0, 5.0]
+        assert prev["total_duration"] == 11.0
+
+        expected = []
+        for wi, (ws, we) in enumerate([(8, 13), (0, 6)]):
+            base_off = 0.0 if wi == 0 else 5.0
+            last_end = None
+            for seq, cue in sorted(src.items()):
+                s, e = max(cue["start"], ws), min(cue["end"], we)
+                if last_end is not None and s < last_end:
+                    s = last_end
+                if e > s:
+                    expected.append((
+                        round(base_off + s - ws, 3),
+                        round(base_off + e - ws, 3),
+                        seq, wi + 1))
+                    last_end = e
+        cc = prev["cues"]
+        assert [(c["start"], c["end"], c["source_seq"], c["window_index"])
+                for c in cc] == expected
+        assert all(c["text"] == src[c["source_seq"]]["text"] for c in cc)
+        assert all(c["source_cue"] == c["source_seq"] + 1 for c in cc)
+        # 顺序与合辑时间码单调不减
+        starts = [c["start"] for c in cc]
+        assert starts == sorted(starts)
+        for a, b in zip(cc, cc[1:]):
+            assert b["start"] >= a["end"]
+
+        # 合辑核心逻辑（合成 cue 直接验证）：窗内静音保留、窗间丢弃、跨窗拆分
+        from app.compilation import compile_cues as _cc, normalize_windows
+        syn = [Cue(0, 2, "甲"), Cue(5, 8, "乙"), Cue(9, 9, "零时长")]
+        one = _cc(syn, normalize_windows([{"start": 0, "end": 10}]))
+        # 甲 0→2、乙 5→8：中间 3s 静音间隙原样保留；零时长 cue 不生成
+        assert [(c.start, c.end, c.text) for c in one] == [
+            (0.0, 2.0, "甲"), (5.0, 8.0, "乙")]
+        two = _cc(syn, normalize_windows(
+            [{"start": 0, "end": 2}, {"start": 5, "end": 8}]))
+        # 两段拼接：窗间间隙丢弃，乙紧随甲之后
+        assert [(c.start, c.end, c.text) for c in two] == [
+            (0.0, 2.0, "甲"), (2.0, 5.0, "乙")]
+        cross = _cc([Cue(4, 6, "跨窗")], normalize_windows(
+            [{"start": 0, "end": 5}, {"start": 5, "end": 10}]))
+        assert [(c.start, c.end, c.text) for c in cross] == [
+            (4.0, 5.0, "跨窗"), (5.0, 6.0, "跨窗")]
+        # cue 仅在闭端与窗口相接：半开交集为空，不生成零时长 cue
+        edge = _cc([Cue(8, 10, "边")], normalize_windows(
+            [{"start": 0, "end": 8}]))
+        assert edge == []
+        # 裁后不足半毫秒、落到同一毫秒刻度的片段不生成 cue
+        tinycue = _cc([Cue(0, 0.0003, "短")], normalize_windows(
+            [{"start": 0, "end": 1}]))
+        assert tinycue == []
+        for bad in ([{"start": -1, "end": 1}],
+                    [{"start": 2, "end": 2}],
+                    [{"start": 0, "end": 3}, {"start": 2, "end": 5}]):
+            try:
+                normalize_windows(bad)
+                raise AssertionError(f"非法窗口未被拒绝：{bad}")
+            except ValueError:
+                pass
+        # 相切窗口合法
+        normalize_windows([{"start": 0, "end": 3}, {"start": 3, "end": 5}])
+
+        # 跨窗口 cue 拆成多条：cue2 同时落在 [6,10) 与 [10,12)，
+        # 文本相同、合辑时间连续；在切点 10 不产生零时长 cue。
+        # cue1 修订末端的毫秒余量也进入窗1，因此先筛出 cue2 的两段。
+        split = client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": 6, "end": 10}, {"start": 10, "end": 12}],
+        }).json()
+        all_split = split["cues"]
+        # cue1 的窗内尾部排在 cue2 第一段之前，时间码与 cue2 起点不重叠
+        tail = [c for c in all_split if c["source_cue"] == 2]
+        assert len(tail) == 1
+        split_cues = [c for c in all_split if c["source_cue"] == 3]
+        assert len(split_cues) == 2
+        assert split_cues[0]["text"] == split_cues[1]["text"] == src[2]["text"]
+        assert (split_cues[0]["start"], split_cues[0]["end"]) == (
+            tail[0]["end"], 4.0)
+        assert split_cues[1]["start"] == split_cues[0]["end"]
+        assert (split_cues[1]["start"], split_cues[1]["end"]) == (
+            4.0, 6.0)
+        assert tail[0]["end"] <= split_cues[0]["start"]
+        # 整个合辑时间码单调不减
+        for a, b in zip(all_split, all_split[1:]):
+            assert a["end"] <= b["start"]
+
+        # 半开窗：落在最后一条 cue 之后的窗口与任何 cue 无交集 → 空合辑
+        after = client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": src[2]["end"] + 1,
+                         "end": src[2]["end"] + 2}],
+        }).json()
+        assert after["cue_count"] == 0
+
+        # 校验：负起点 / 终点不大于起点 / 重叠窗口 → 400
+        bad_payloads = [
+            {"windows": [{"start": -1, "end": 2}]},
+            {"windows": [{"start": 3, "end": 3}]},
+            {"windows": [{"start": 0, "end": 5}, {"start": 4, "end": 9}]},
+        ]
+        for body in bad_payloads:
+            r = client.put(f"/api/submissions/{cpid}/compilation", json=body)
+            assert r.status_code == 400, body
+
+        # 空窗口集：合法保存，导出结构有效的空 WebVTT
+        r = client.put(f"/api/submissions/{cpid}/compilation",
+                       json={"windows": []})
+        assert r.status_code == 200
+        assert r.json()["cue_count"] == 0
+        empty_exp = client.get(f"/api/submissions/{cpid}/compilation/export")
+        assert empty_exp.status_code == 200
+        assert empty_exp.text.strip() == "WEBVTT"
+        assert empty_exp.text.count("-->") == 0
+        assert "attachment" in empty_exp.headers["content-disposition"]
+        assert "compilation.vtt" in empty_exp.headers["content-disposition"]
+
+        # 保存有效配置后：GET 可回读（重开历史任务可再编辑）
+        client.put(f"/api/submissions/{cpid}/compilation", json={
+            "windows": [{"start": 8, "end": 13}, {"start": 0, "end": 6}],
+        })
+        saved = client.get(f"/api/submissions/{cpid}/compilation").json()
+        assert saved["windows"] == [
+            {"start": 8.0, "end": 13.0}, {"start": 0.0, "end": 6.0}]
+
+        # 导出独立合辑 WebVTT：合辑时间码、原 cue 文本
+        cv = client.get(f"/api/submissions/{cpid}/compilation/export")
+        assert cv.status_code == 200
+        cblocks = _parse_vtt_blocks(cv.text)
+        assert len(cblocks) == len(prev["cues"])
+        for (_notes, s, e, text), cue in zip(cblocks, prev["cues"]):
+            assert s == format_timestamp(cue["start"])
+            assert e == format_timestamp(cue["end"])
+            assert text == cue["text"]
+
+        # NOTE 保留：用有校验问题的任务，窗口完整覆盖全部修订 cue
+        assert mx["issues"], "该任务应存在校验问题"
+        ip = client.put(f"/api/submissions/{mxid}/compilation", json={
+            "windows": [{"start": 0, "end": 100}],
+        }).json()
+        assert ip["cue_count"] == len(mx["cues"])
+        noted = [c for c in ip["cues"] if c["notes"]]
+        assert len({c["source_cue"] for c in noted}) == len(
+            {i["cue_seq"] for i in mx["issues"]})
+        iexp = client.get(f"/api/submissions/{mxid}/compilation/export")
+        iblocks = _parse_vtt_blocks(iexp.text)
+        assert sum(len(b[0]) for b in iblocks) == len(mx["issues"])
+        assert any(n.startswith("[校验问题/")
+                   for b in iblocks for n in b[0])
+        # 完整覆盖单窗口时合辑时间码等于原修订时间码
+        for (_notes, s, e, text), cue in zip(iblocks, ip["cues"]):
+            assert s == format_timestamp(cue["start"])
+            assert e == format_timestamp(cue["end"])
+            assert text == cue["text"]
+
+        # 问题 cue 被跨窗拆分时，每个拆分段都带同样的校验 NOTE
+        iss_seq = mx["issues"][0]["cue_seq"]
+        icue = next(c for c in mx["cues"] if c["seq"] == iss_seq)
+        mid = icue["start"] + (icue["end"] - icue["start"]) / 2
+        split2 = client.put(f"/api/submissions/{mxid}/compilation", json={
+            "windows": [{"start": 0, "end": mid},
+                        {"start": mid, "end": 100}],
+        }).json()
+        split_parts = [c for c in split2["cues"]
+                       if c["source_seq"] == iss_seq]
+        assert len(split_parts) == 2
+        assert all(c["notes"] for c in split_parts)
+
+        # 原修订导出不受合辑窗口配置影响
+        full_after = client.get(f"/api/submissions/{mxid}/export").text
+        assert full_after.count("-->") == len(mx["cues"])
+
+        # 不存在的任务 → 404
+        assert client.get(
+            "/api/submissions/9999/compilation").status_code == 404
+        assert client.put("/api/submissions/9999/compilation",
+                          json={"windows": []}).status_code == 404
+
 
         # --- 术语审校 ---
         # 1. 维护按语言区分的术语表

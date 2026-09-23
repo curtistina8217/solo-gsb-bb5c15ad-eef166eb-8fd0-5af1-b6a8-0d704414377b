@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>字幕断句校验台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>字幕断句校验台</h1>
+    <span class="subtitle">WebVTT / SRT · 动态规划断句 · 边界重分配 · 术语审校 · 问题最小化标注</span>
+  </header>
+
+  <main>
+    <section class="card" id="upload-card">
+      <h2>1. 上传字幕并设定阈值</h2>
+      <form id="analyze-form">
+        <div class="form-row">
+          <label class="file-label">
+            <input type="file" id="file" accept=".vtt,.srt" required />
+            <span id="file-name">选择 .vtt 或 .srt 文件…</span>
+          </label>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="max-chars">每行最大字数</label>
+            <input type="number" id="max-chars" value="18" min="1" max="200" />
+          </div>
+          <div class="field">
+            <label for="min-dwell">最小停留（秒）</label>
+            <input type="number" id="min-dwell" value="0.8" min="0.1" step="0.1" />
+          </div>
+          <div class="field">
+            <label for="max-cps">阅读速度上限（字/秒）</label>
+            <input type="number" id="max-cps" value="12" min="1" step="0.5" />
+          </div>
+        </div>
+        <button type="submit" id="analyze-btn" class="primary">开始校验断句</button>
+        <p class="error" id="form-error" hidden></p>
+      </form>
+    </section>
+
+    <section class="card" id="terms-card">
+      <h2>术语表管理 <span class="muted">按语言区分 · 规范词 / 允许变体 / 禁止替代词</span></h2>
+      <form id="term-form">
+        <div class="form-grid term-grid">
+          <div class="field">
+            <label for="term-lang">语言</label>
+            <select id="term-lang"></select>
+          </div>
+          <div class="field">
+            <label for="term-canonical">规范词 *</label>
+            <input type="text" id="term-canonical" placeholder="如 WebVTT / 人工智能" required />
+          </div>
+          <div class="field">
+            <label for="term-variants">允许变体（逗号分隔）</label>
+            <input type="text" id="term-variants" placeholder="可留空" />
+          </div>
+          <div class="field">
+            <label for="term-forbidden">禁止替代词（逗号分隔）</label>
+            <input type="text" id="term-forbidden" placeholder="如 webvtt, 帐号" />
+          </div>
+          <div class="field">
+            <label for="term-note">备注</label>
+            <input type="text" id="term-note" placeholder="可留空" />
+          </div>
+        </div>
+        <button type="submit" class="primary">添加术语</button>
+        <p class="error" id="term-error" hidden></p>
+      </form>
+      <div class="table-wrap terms-wrap">
+        <table id="terms-table">
+          <thead>
+            <tr><th>语言</th><th>规范词</th><th>允许变体</th><th>禁止替代词</th><th>备注</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="result-card" hidden>
+      <div class="result-head">
+        <h2>2. 校验结果 <span id="result-file" class="muted"></span></h2>
+        <button id="export-btn" class="secondary">导出修订 WebVTT</button>
+      </div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="filters">
+        <label>按语言筛选问题：
+          <select id="lang-filter"><option value="">全部语言</option></select>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="only-issues" /> 只看有问题的条目
+        </label>
+        <span id="issue-count-note" class="muted"></span>
+      </div>
+
+      <div class="panes">
+        <div class="pane">
+          <h3>修订后字幕（修订边界已重分配）</h3>
+          <div class="table-wrap">
+            <table id="cues-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>时间码</th><th>停留</th><th>字数</th><th>字/秒</th>
+                  <th>文本 / 来源 cue</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pane">
+          <h3>无法满足约束的最小区段</h3>
+          <ul id="issues-list" class="issues"></ul>
+        </div>
+      </div>
+
+      <div class="term-review" id="term-review" hidden>
+        <div class="result-head term-head">
+          <h3>术语审校（跨 cue 一致性） <span id="term-summary" class="muted"></span></h3>
+          <div class="term-ops">
+            <button id="term-recheck" class="secondary" title="按当前术语表重新检测（重置确认状态）">重新检测</button>
+            <button id="term-accept-all" class="secondary">全部接受</button>
+            <button id="term-dismiss-all" class="secondary">全部忽略</button>
+            <button id="term-export" class="primary">导出术语修订 WebVTT</button>
+            <button id="term-report" class="secondary">导出审校报告 CSV</button>
+          </div>
+        </div>
+        <ul id="term-findings" class="issues term-findings"></ul>
+      </div>
+    </section>
+
+    <section class="card" id="history-card">
+      <h2>历史任务</h2>
+      <div class="table-wrap">
+        <table id="history-table">
+          <thead>
+            <tr><th>#</th><th>文件</th><th>阈值</th><th>问题</th><th>时间</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

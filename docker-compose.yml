@@ -1,0 +1,12 @@
+services:
+  subtitle-bench:
+    build: .
+    container_name: subtitle-bench
+    ports:
+      - "8000:8000"
+    volumes:
+      - subtitle-data:/data
+    restart: unless-stopped
+
+volumes:
+  subtitle-data:
